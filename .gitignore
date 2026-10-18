@@ -1,0 +1,6 @@
+node_modules/
+.work/
+.DS_Store
+*.mp4
+*.mp3
+*.wav
