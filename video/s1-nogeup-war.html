@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이 땅이… 진짜 제 땅입니까? | 녹읍 vs 정전</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@600;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<style>
+  html,body{margin:0;background:#141210;color:#E9E3D4;font-family:Pretendard,system-ui,sans-serif}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px}
+  canvas{height:min(82vh,1920px);aspect-ratio:9/16;background:#000;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  #ui{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;max-width:720px}
+  button{font:inherit;font-weight:700;padding:9px 14px;border-radius:10px;border:1px solid #5a5246;background:#2a2622;color:#E9E3D4;cursor:pointer}
+  button.rec{background:#C8412B;border-color:#C8412B}
+  button:disabled{opacity:.5;cursor:default}
+  input[type=range]{width:min(420px,80vw)}
+  #time{font-variant-numeric:tabular-nums;min-width:90px;text-align:center}
+  #note{font-size:13px;opacity:.75;max-width:640px;text-align:center;line-height:1.5;margin:0}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="1080" height="1920"></canvas>
+  <div id="ui">
+    <button id="play">▶ 재생</button>
+    <input id="seek" type="range" min="0" max="60" step="0.05" value="0">
+    <span id="time">0.0 / 60s</span>
+    <button id="rec" class="rec">● 녹화해서 영상 저장</button>
+  </div>
+  <p id="note">녹화는 60초 동안 실시간으로 진행돼요. 녹화 중에는 이 탭을 앞에 띄워 두세요. 끝나면 영상 파일이 자동으로 다운로드됩니다.<br>※ 인물과 대사는 이해를 돕기 위한 각색입니다.</p>
+</div>
+<script>
+'use strict';
+/* =========================================================================
+   「이 땅이… 진짜 제 땅입니까?」 v4 — 쉬운 설명 + 드라마 + 모션그래픽
+   실사 컷 대신 코드로 그린 먹·한지풍 화면, 목소리 대신 자막.
+   제작표: episodes/s1-nogeup-war/script_v4_explainer.md
+   ========================================================================= */
+const W = 1080, H = 1920, DUR = 60, FPS = 30;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const C = { ink:'#2A2622', paper:'#E9E3D4', red:'#C8412B', green:'#4C7A6B', gold:'#D9A441', purple:'#4b2a52', crimson:'#8f1f1f', indigo:'#2e3550', blue:'#3d5a80' };
+const SERIF = '"Noto Serif KR","Nanum Myeongjo","AppleMyungjo",serif';
+const SANS  = 'Pretendard,"Apple SD Gothic Neo","Malgun Gothic",sans-serif';
+
+/* ---------- 유틸 ---------- */
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp  = (a, b, t) => a + (b - a) * t;
+const ease  = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+const prog  = (t, a, b) => clamp((t - a) / (b - a));
+const fade  = (t, a, b, fi = .4, fo = .4) => (t < a || t > b) ? 0 : Math.min(clamp((t - a) / fi), clamp((b - t) / fo));
+const bump  = (t, a, b) => (t < a || t > b) ? 0 : Math.sin(Math.PI * (t - a) / (b - a));
+function rng(seed) { let s = seed >>> 0 || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
+function hexA(h, a) { const n = parseInt(h.slice(1), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; }
+function mkCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+function circle(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+function rrect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function stroke(x1, y1, x2, y2, w, col) { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+/* ---------- 미리 만드는 질감 ---------- */
+const PAPER = (() => {             // 한지 질감
+  const c = mkCanvas(540, 960), g = c.getContext('2d'), r = rng(11);
+  const img = g.createImageData(540, 960), d = img.data;
+  for (let i = 0; i < d.length; i += 4) { const v = 222 + r() * 22 - 11; d[i] = v + 4; d[i + 1] = v - 2; d[i + 2] = v - 18; d[i + 3] = 255; }
+  g.putImageData(img, 0, 0);
+  g.strokeStyle = 'rgba(150,130,100,.18)'; g.lineWidth = 1;
+  for (let i = 0; i < 900; i++) { const x = r() * 540, y = r() * 960, a = r() * 6.28, l = 6 + r() * 26; g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a + .6) * l * .5, y + Math.sin(a + .6) * l * .5, x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); }
+  return c;
+})();
+const GRAIN = (() => {             // 필름 입자
+  const c = mkCanvas(360, 640), g = c.getContext('2d'), r = rng(23);
+  const img = g.createImageData(360, 640), d = img.data;
+  for (let i = 0; i < d.length; i += 4) { const v = r() * 255; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 40; }
+  g.putImageData(img, 0, 0); return c;
+})();
+const STALKS = (() => { const r = rng(7), a = []; for (let i = 0; i < 850; i++) { const d = Math.pow(r(), 1.5); a.push({ x: r() * 1.2 - .1, d, ph: r() * 6.28, h: .7 + r() * .6, c: r() }); } return a.sort((p, q) => p.d - q.d); })();
+const STUBBLE = (() => { const r = rng(5), a = []; for (let i = 0; i < 520; i++) a.push({ x: r() * 1.1 - .05, d: Math.pow(r(), 1.4), l: .5 + r() }); return a.sort((p, q) => p.d - q.d); })();
+const PUDDLES = [[.22, .25, .5], [.7, .42, .8], [.35, .7, 1.1], [.82, .85, 1.3]];
+const RAIN = (() => { const r = rng(9), a = []; for (let i = 0; i < 140; i++) a.push({ x: r() * 1.2, y: r(), v: .6 + r() * .6, l: 30 + r() * 50 }); return a; })();
+const BRUSH = (() => { const r = rng(31), a = []; for (let i = 0; i < 7; i++) { const row = []; for (let j = 0; j < 9; j++) row.push(.3 + r() * .7); a.push(row); } return a; })();
+const MUD = (() => { const r = rng(41), a = []; for (let i = 0; i < 160; i++) a.push({ x: r(), y: r(), s: 20 + r() * 140, v: r() }); return a; })();
+
+/* ---------- 배경 ---------- */
+function sky(era, t, sun) {
+  const g = ctx.createLinearGradient(0, 0, 0, H * .72);
+  if (era === 681) { g.addColorStop(0, '#59626b'); g.addColorStop(1, '#a2a6a3'); }
+  else { g.addColorStop(0, '#41597a'); g.addColorStop(.5, '#c7894a'); g.addColorStop(1, '#f3c56f'); }
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (era === 681) {            // 흐린 구름 띠
+    ctx.fillStyle = 'rgba(70,76,82,.25)';
+    for (let i = 0; i < 5; i++) { const y = 140 + i * 130, x = ((t * 8 + i * 230) % 1600) - 300; ctx.beginPath(); ctx.ellipse(x, y, 420, 46, 0, 0, 7); ctx.fill(); }
+  }
+  if (era === 722 && sun) {
+    const [sx, sy] = sun;
+    let r = ctx.createRadialGradient(sx, sy, 0, sx, sy, 620);
+    r.addColorStop(0, 'rgba(255,240,200,.95)'); r.addColorStop(.12, 'rgba(255,214,140,.7)'); r.addColorStop(1, 'rgba(255,190,110,0)');
+    ctx.fillStyle = r; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,248,225,.98)'; circle(sx, sy, 44);
+  }
+}
+function hills(era, base, t) {
+  const cols = era === 722 ? ['rgba(150,100,70,.32)', 'rgba(105,72,52,.55)', 'rgba(62,44,32,.85)'] : ['rgba(112,120,126,.45)', 'rgba(86,93,99,.65)', 'rgba(58,64,68,.88)'];
+  for (let L = 0; L < 3; L++) {
+    ctx.fillStyle = cols[L]; ctx.beginPath(); ctx.moveTo(0, H);
+    const off = t * (2 + L * 3);
+    for (let x = 0; x <= W; x += 12) {
+      const y = base - 150 + L * 58 - (Math.sin((x + off) * .004 * (1 + L * .5) + L * 2) * 62 + Math.sin((x + off) * .011 + L) * 24) * (1 - L * .25);
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+  }
+}
+function field722(t, hz) {
+  const g = ctx.createLinearGradient(0, hz, 0, H); g.addColorStop(0, '#c99a45'); g.addColorStop(1, '#4e3a1c');
+  ctx.fillStyle = g; ctx.fillRect(0, hz, W, H - hz);
+  for (const s of STALKS) {
+    const y = hz + s.d * s.d * (H - hz) * 1.06, len = (12 + s.d * 240) * s.h, x = s.x * W;
+    const sw = Math.sin(t * 1.4 + s.ph + x * .004) * (4 + s.d * 26);
+    ctx.strokeStyle = s.d < .3 ? 'rgba(130,92,44,.55)' : `rgba(${lerp(150, 232, s.c) | 0},${lerp(108, 176, s.c) | 0},58,.88)`;
+    ctx.lineWidth = .8 + s.d * 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(x + sw * .3, y - len * .6, x + sw, y - len); ctx.stroke();
+    if (s.d > .28) { ctx.fillStyle = 'rgba(242,198,96,.92)'; ctx.beginPath(); ctx.ellipse(x + sw, y - len, 3 + s.d * 7, 9 + s.d * 20, sw * .02, 0, 7); ctx.fill(); }
+  }
+}
+function field681(t, hz, rings = true) {
+  const g = ctx.createLinearGradient(0, hz, 0, H); g.addColorStop(0, '#77746c'); g.addColorStop(1, '#3a342d');
+  ctx.fillStyle = g; ctx.fillRect(0, hz, W, H - hz);
+  for (const [px, py, s] of PUDDLES) {
+    const y = hz + py * py * (H - hz), x = px * W;
+    ctx.fillStyle = 'rgba(165,172,172,.55)'; ctx.beginPath(); ctx.ellipse(x, y, 120 * s, 22 * s, 0, 0, 7); ctx.fill();
+    if (rings) for (let k = 0; k < 3; k++) { const ph = ((t * .9 + k * .33 + px) % 1); ctx.strokeStyle = `rgba(220,225,225,${.5 * (1 - ph)})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(x + (k - 1) * 40 * s, y, 8 + ph * 40 * s, (8 + ph * 40 * s) * .2, 0, 0, 7); ctx.stroke(); }
+  }
+  for (const s of STUBBLE) { const y = hz + s.d * s.d * (H - hz) * 1.05, x = s.x * W, l = (4 + s.d * 40) * s.l; stroke(x, y, x + 2, y - l, .8 + s.d * 3, 'rgba(48,42,36,.65)'); }
+}
+function rain(t, a = .35) {
+  ctx.strokeStyle = `rgba(220,228,232,${a})`; ctx.lineWidth = 1.6;
+  for (const d of RAIN) { const y = ((d.y + t * d.v) % 1) * (H + 200) - 100, x = (d.x * W + t * 40 * d.v) % (W + 100) - 50; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 8, y + d.l); ctx.stroke(); }
+}
+function paperBg(dark = 0) {
+  ctx.drawImage(PAPER, 0, 0, W, H);
+  const v = ctx.createRadialGradient(W / 2, H / 2, 300, W / 2, H / 2, 1250);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, `rgba(40,30,20,${.55 + dark})`);
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+}
+
+/* ---------- 인물·사물 (먹 실루엣) ---------- */
+function fig(x, y, s, o = {}) {
+  ctx.save(); ctx.translate(x, y); if (o.flip) ctx.scale(-1, 1);
+  const col = o.color || C.ink, r = s * .085;
+  if (o.stone) { ctx.fillStyle = '#5b5750'; ctx.beginPath(); ctx.ellipse(-s * .16, -s * .62, s * .2, s * .14, -.3, 0, 7); ctx.fill(); }
+  ctx.fillStyle = col;
+  const bend = o.bend || 0;
+  ctx.beginPath(); ctx.moveTo(-s * .1 + bend, -s * .78); ctx.lineTo(s * .1 + bend, -s * .78); ctx.lineTo(s * .18, -s * .05); ctx.lineTo(-s * .18, -s * .05); ctx.closePath(); ctx.fill();
+  ctx.fillRect(-s * .1, -s * .07, s * .07, s * .07); ctx.fillRect(s * .03, -s * .07, s * .07, s * .07);
+  const hx = bend * 1.4, hy = -s * .86 + Math.abs(bend) * .3;
+  circle(hx, hy, r);
+  if (o.hat) { ctx.fillRect(hx - r * 1.05, hy - r * 2, r * 2.1, r * 1.25); ctx.fillRect(hx - r * 2.7, hy - r * 1.55, r * 5.4, r * .28); }
+  else circle(hx, hy - r * 1.1, r * .45);
+  if (o.arm) { ctx.strokeStyle = col; ctx.lineWidth = s * .055; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(s * .06 + bend, -s * .7); ctx.lineTo(o.arm[0], o.arm[1]); ctx.stroke(); }
+  ctx.restore();
+}
+function kneel(x, y, s, t) {     // 뒷모습으로 무릎 꿇은 두지
+  const br = 1 + .035 * bump(t, 46.8, 48.2);
+  ctx.save(); ctx.translate(x, y); ctx.scale(1, br); ctx.fillStyle = '#1d1712';
+  ctx.beginPath(); ctx.moveTo(-s * .34, 0); ctx.quadraticCurveTo(-s * .42, -s * .42, -s * .2, -s * .62); ctx.quadraticCurveTo(0, -s * .7, s * .2, -s * .62); ctx.quadraticCurveTo(s * .42, -s * .42, s * .34, 0); ctx.closePath(); ctx.fill();
+  circle(0, -s * .68, s * .11); circle(0, -s * .8, s * .045);
+  ctx.fillStyle = 'rgba(120,80,50,.9)'; ctx.fillRect(-s * .11, -s * .74, s * .22, s * .03);   // 머리띠
+  ctx.strokeStyle = 'rgba(255,205,120,.55)'; ctx.lineWidth = 4;                              // 역광 테두리
+  ctx.beginPath(); ctx.moveTo(-s * .2, -s * .62); ctx.quadraticCurveTo(0, -s * .7, s * .2, -s * .62); ctx.stroke();
+  ctx.restore();
+  const fx = x + s * .36, fy = y - s * .05;        // 흙을 쥔 주먹과 떨어지는 흙
+  ctx.fillStyle = '#1d1712'; circle(fx, fy, s * .06);
+  if (t > 46.4) for (let i = 0; i < 6; i++) { const p = ((t - 46.4) * .9 + i * .17) % 1; ctx.fillStyle = `rgba(60,40,25,${1 - p})`; circle(fx + (i - 3) * 3, fy + 10 + p * 80, 3); }
+}
+function hand(x, y, s, rot, col, curl = 0) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.fillStyle = col; ctx.strokeStyle = col; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.ellipse(0, 0, s * .42, s * .5, 0, 0, 7); ctx.fill();
+  const fl = [.62, .72, .68, .52], fx = [-.28, -.09, .1, .27];
+  for (let i = 0; i < 4; i++) { ctx.lineWidth = s * .19; ctx.beginPath(); ctx.moveTo(fx[i] * s, -s * .3); ctx.lineTo(fx[i] * s * (1 - curl * .2), -s * .3 - s * fl[i] * (1 - curl * .6)); ctx.stroke(); }
+  ctx.lineWidth = s * .2; ctx.beginPath(); ctx.moveTo(-s * .3, 0); ctx.lineTo(-s * (.62 - curl * .25), -s * (.36 - curl * .1)); ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 2;
+  for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(-s * .25, -s * .1 + i * s * .12); ctx.quadraticCurveTo(0, -s * .05 + i * s * .12, s * .25, -s * .12 + i * s * .12); ctx.stroke(); }
+  ctx.restore();
+}
+function sleeve(x1, y1, x2, y2, w, col) {
+  const g = ctx.createLinearGradient(x1, y1, x2, y2); g.addColorStop(0, col); g.addColorStop(1, hexA('#000000', .0));
+  ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = w * .25; ctx.beginPath(); ctx.moveTo(x1, y1 - w * .2); ctx.lineTo(x2, y2 - w * .2); ctx.stroke();
+}
+function hut(x, y, s) {
+  ctx.fillStyle = '#6e6152'; ctx.fillRect(x - s * .5, y - s * .45, s, s * .45);
+  ctx.fillStyle = '#3e352c'; ctx.beginPath(); ctx.moveTo(x - s * .62, y - s * .4); ctx.quadraticCurveTo(x, y - s * 1.0, x + s * .62, y - s * .4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#151210'; ctx.fillRect(x - s * .12, y - s * .32, s * .24, s * .32);
+}
+function seal(x, y, s, alpha = 1) {
+  ctx.save(); ctx.globalAlpha *= alpha;
+  ctx.fillStyle = 'rgba(0,0,0,.25)'; rrect(x - s * .5 + 10, y - s * .5 + 14, s, s, 10); ctx.fill();
+  const g = ctx.createLinearGradient(x - s / 2, y - s / 2, x + s / 2, y + s / 2); g.addColorStop(0, '#a88552'); g.addColorStop(1, '#5c4425');
+  ctx.fillStyle = g; rrect(x - s / 2, y - s / 2, s, s, 10); ctx.fill();
+  ctx.fillStyle = '#7a5b33'; circle(x, y, s * .26); ctx.fillStyle = 'rgba(255,230,180,.35)'; circle(x - s * .07, y - s * .07, s * .1);
+  ctx.restore();
+}
+function redMark(x, y, s, p) {   // 찍힌 인주 자국
+  if (p <= 0) return;
+  ctx.save(); ctx.globalAlpha *= clamp(p * 1.4);
+  const k = .9 + .1 * easeOut(p);
+  for (let i = 0; i < 4; i++) { ctx.fillStyle = hexA(C.red, .18); ctx.fillRect(x - s * k / 2 + (i - 2) * 2, y - s * k / 2 + (i % 2) * 3, s * k, s * k); }
+  ctx.fillStyle = hexA(C.red, .85); ctx.fillRect(x - s * k / 2, y - s * k / 2, s * k, s * k);
+  ctx.strokeStyle = 'rgba(255,235,220,.85)'; ctx.lineWidth = s * .06;
+  ctx.strokeRect(x - s * .32, y - s * .32, s * .64, s * .64); stroke(x, y - s * .3, x, y + s * .3, s * .06, 'rgba(255,235,220,.85)'); stroke(x - s * .3, y, x + s * .3, y, s * .06, 'rgba(255,235,220,.85)');
+  ctx.restore();
+}
+function scroll(cx, cy, w, h, t, glow = 0) {
+  ctx.save(); ctx.translate(cx + Math.sin(t * 31) * 1.5, cy + Math.cos(t * 27) * 1.2);
+  if (glow) { const r = ctx.createRadialGradient(0, 0, 0, 0, 0, w * .8); r.addColorStop(0, `rgba(255,230,160,${.45 * glow})`); r.addColorStop(1, 'rgba(255,230,160,0)'); ctx.fillStyle = r; ctx.fillRect(-w, -w, w * 2, w * 2); }
+  const g = ctx.createLinearGradient(0, -h / 2, 0, h / 2); g.addColorStop(0, '#f2e8d0'); g.addColorStop(1, '#d9c9a4');
+  ctx.fillStyle = g; ctx.fillRect(-w / 2, -h / 2, w, h);
+  for (let i = 0; i < BRUSH.length; i++) for (let j = 0; j < BRUSH[i].length; j++) {
+    const x = w / 2 - 60 - i * (w - 120) / BRUSH.length, y = -h / 2 + 40 + j * (h - 80) / BRUSH[i].length;
+    stroke(x, y, x, y + 14 * BRUSH[i][j], 6, 'rgba(60,50,40,.45)');
+  }
+  ctx.fillStyle = hexA(C.red, .75); ctx.fillRect(-w / 2 + 40, h / 2 - 90, 46, 46);
+  for (const sx of [-w / 2, w / 2]) { const rg = ctx.createLinearGradient(sx - 18, 0, sx + 18, 0); rg.addColorStop(0, '#7a5d3a'); rg.addColorStop(.5, '#c9a874'); rg.addColorStop(1, '#6a4f30'); ctx.fillStyle = rg; rrect(sx - 18, -h / 2 - 22, 36, h + 44, 14); ctx.fill(); }
+  ctx.restore();
+}
+
+/* ---------- 모션그래픽: 연표 줄 ---------- */
+const YEARS = ['681', '689', '722', '757'], TX = [180, 420, 660, 900], TY = 150;
+const YCOL = [C.red, C.red, C.gold, C.red];
+const DOT = [[0, 2], [3.3, 2], [4.3, 0], [28.4, 0], [29.2, 1], [36.6, 1], [37.6, 2], [49.3, 2], [50.1, 3], [60, 3]];
+function dotIndex(t) {
+  for (let i = 0; i < DOT.length - 1; i++) if (t < DOT[i + 1][0]) return lerp(DOT[i][1], DOT[i + 1][1], ease(prog(t, DOT[i][0], DOT[i + 1][0])));
+  return DOT[DOT.length - 1][1];
+}
+function timeline(t) {
+  const v = Math.min(prog(t, .2, .8), 1 - fade(t, 44.8, 49.2, .4, .4));
+  if (v <= 0) return;
+  const all = prog(t, 55.4, 56.2);
+  ctx.save(); ctx.globalAlpha = v;
+  ctx.fillStyle = 'rgba(20,16,12,.42)'; rrect(110, 92, 860, 120, 60); ctx.fill();
+  stroke(TX[0], TY, lerp(TX[0], TX[3], prog(t, .2, 1)), TY, 5, 'rgba(233,227,212,.75)');
+  const di = dotIndex(t), near = Math.round(di);
+  for (let i = 0; i < 4; i++) {
+    const lit = i === near || all > 0;
+    ctx.fillStyle = lit ? YCOL[i] : 'rgba(233,227,212,.7)'; circle(TX[i], TY, lit ? 11 : 8);
+    ctx.font = `${lit ? 800 : 600} 34px ${SANS}`; ctx.textAlign = 'center'; ctx.fillStyle = lit ? '#fff' : 'rgba(233,227,212,.75)';
+    ctx.fillText(YEARS[i], TX[i], TY + 50);
+  }
+  if (all < 1) {
+    const x = lerp(TX[Math.floor(di)], TX[Math.min(3, Math.floor(di) + 1)], di - Math.floor(di));
+    const col = YCOL[near];
+    const r = ctx.createRadialGradient(x, TY, 0, x, TY, 46); r.addColorStop(0, hexA(col, .7)); r.addColorStop(1, hexA(col, 0));
+    ctx.globalAlpha = v * (1 - all); ctx.fillStyle = r; circle(x, TY, 46); ctx.fillStyle = col; circle(x, TY, 18); ctx.fillStyle = '#fff'; circle(x, TY, 7);
+  }
+  ctx.restore();
+}
+
+/* ---------- 모션그래픽: 쌀이 어디로 가나 흐름도 ---------- */
+const NODE = { 귀족: [240, 545], 백성: [840, 545], 나라: [540, 350] };
+function node(name, ring, alpha = 1, scale = 1) {
+  if (alpha <= 0 || scale <= 0) return;
+  const [x, y] = NODE[name]; ctx.save(); ctx.globalAlpha *= alpha; ctx.translate(x, y); ctx.scale(scale, scale);
+  ctx.fillStyle = C.paper; circle(0, 0, 80); ctx.lineWidth = 8; ctx.strokeStyle = ring; ctx.beginPath(); ctx.arc(0, 0, 80, 0, 7); ctx.stroke();
+  ctx.fillStyle = C.ink; ctx.font = `900 46px ${SERIF}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(name, 0, 2);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
+function curvePts(a, b, bendAmt) {
+  const [x1, y1] = NODE[a], [x2, y2] = NODE[b], dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy), ux = dx / L, uy = dy / L;
+  const P0 = [x1 + ux * 96, y1 + uy * 96], P1 = [x2 - ux * 96, y2 - uy * 96];
+  const Pc = [(P0[0] + P1[0]) / 2 - uy * bendAmt, (P0[1] + P1[1]) / 2 + ux * bendAmt];
+  return [P0, Pc, P1];
+}
+const qpt = ([P0, Pc, P1], u) => [(1 - u) * (1 - u) * P0[0] + 2 * (1 - u) * u * Pc[0] + u * u * P1[0], (1 - u) * (1 - u) * P0[1] + 2 * (1 - u) * u * Pc[1] + u * u * P1[1]];
+function arrow(a, b, p, col, bendAmt = 0, label = '', alpha = 1) {
+  if (p <= 0 || alpha <= 0) return;
+  const pts = curvePts(a, b, bendAmt);
+  ctx.save(); ctx.globalAlpha *= alpha; ctx.strokeStyle = col; ctx.lineWidth = 12; ctx.lineCap = 'round';
+  ctx.beginPath(); for (let i = 0; i <= 40; i++) { const u = i / 40 * p; const [x, y] = qpt(pts, u); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke();
+  const hp = clamp((p - .8) / .2);
+  if (hp > 0) { const [ex, ey] = qpt(pts, 1), [px, py] = qpt(pts, .96), an = Math.atan2(ey - py, ex - px); ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(ex + Math.cos(an) * 20 * hp, ey + Math.sin(an) * 20 * hp); ctx.lineTo(ex + Math.cos(an + 2.5) * 34 * hp, ey + Math.sin(an + 2.5) * 34 * hp); ctx.lineTo(ex + Math.cos(an - 2.5) * 34 * hp, ey + Math.sin(an - 2.5) * 34 * hp); ctx.closePath(); ctx.fill(); }
+  if (label && p >= 1) { const [mx, my] = qpt(pts, .5); pill(mx, my - (bendAmt >= 0 ? 52 : -52), label, col); }
+  ctx.restore();
+}
+function pill(x, y, text, col) {
+  ctx.font = `800 40px ${SANS}`; const w = ctx.measureText(text).width + 44;
+  ctx.fillStyle = 'rgba(20,16,12,.85)'; rrect(x - w / 2, y - 32, w, 60, 30); ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.fillText(text, x, y + 12);
+}
+function token(a, b, bendAmt, p, kind, col) {
+  if (p <= 0 || p >= 1) return;
+  const [x, y] = qpt(curvePts(a, b, bendAmt), ease(p)); ctx.save(); ctx.translate(x, y - 6);
+  if (kind === 'rice') { ctx.fillStyle = '#d8bf86'; ctx.beginPath(); ctx.ellipse(0, 0, 26, 32, 0, 0, 7); ctx.fill(); ctx.fillStyle = '#8a6b3c'; ctx.fillRect(-14, -30, 28, 7); }
+  else if (kind === 'land') { ctx.fillStyle = col; ctx.fillRect(-26, -20, 52, 40); ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 3; ctx.strokeRect(-26, -20, 52, 40); stroke(0, -20, 0, 20, 3, 'rgba(255,255,255,.6)'); stroke(-26, 0, 26, 0, 3, 'rgba(255,255,255,.6)'); }
+  else { ctx.fillStyle = C.paper; circle(0, -22, 11); ctx.fillRect(-11, -10, 22, 30); }
+  ctx.restore();
+}
+function cross(x, y, p) {
+  if (p <= 0) return;
+  const a = clamp(p * 2), b = clamp(p * 2 - 1);
+  stroke(x - 50, y - 50, lerp(x - 50, x + 50, a), lerp(y - 50, y + 50, a), 16, C.red);
+  if (b > 0) stroke(x + 50, y - 50, lerp(x + 50, x - 50, b), lerp(y - 50, y + 50, b), 16, C.red);
+}
+function flow(t) {
+  const w1 = fade(t, 13.6, 35.3), w2 = fade(t, 40.8, 45.1), w3 = fade(t, 50.8, 55.3);
+  const vis = Math.max(w1, w2, w3); if (vis <= 0) return;
+  ctx.save(); ctx.globalAlpha = vis;
+  ctx.fillStyle = w3 > 0 ? 'rgba(40,10,8,.55)' : 'rgba(20,16,12,.45)'; rrect(70, 255, 940, 420, 36); ctx.fill();
+  ctx.strokeStyle = 'rgba(233,227,212,.25)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = 'rgba(233,227,212,.85)'; ctx.font = `700 30px ${SANS}`; ctx.textAlign = 'left'; ctx.fillText('쌀은 어디로 가나?', 104, 304);
+  if (w1 > 0) {
+    const xed = prog(t, 31.3, 31.9);
+    node('귀족', C.red); node('백성', C.green);
+    const label = t > 26.3 ? '쌀 + 일' : t > 20.9 ? '쌀' : '';
+    arrow('백성', '귀족', prog(t, 14.2, 15.1), C.red, 0, label, 1 - .6 * xed);
+    token('백성', '귀족', 0, prog(t, 19.6, 20.9), 'rice');
+    for (let i = 0; i < 3; i++) token('백성', '귀족', 0, prog(t, 24.6 + i * .35, 26 + i * .35), 'person');
+    cross(540, 545, xed);
+  }
+  if (w2 > 0) {
+    node('귀족', '#777', .3); node('백성', C.green); node('나라', C.gold, 1, easeOut(prog(t, 40.9, 41.5)));
+    arrow('나라', '백성', prog(t, 41.4, 42.1), C.green, -70, '땅');
+    arrow('백성', '나라', prog(t, 42.2, 42.9), C.gold, -70, '쌀');
+    token('나라', '백성', -70, prog(t, 42.1, 43.3), 'land', C.green);
+    token('백성', '나라', -70, prog(t, 42.9, 44.1), 'rice');
+  }
+  if (w3 > 0) {
+    node('나라', C.gold, .3); node('귀족', C.red, 1, 1 + .06 * Math.sin(t * 6)); node('백성', C.green);
+    arrow('백성', '귀족', prog(t, 51.3, 52.1), C.red, 0, '쌀 + 일');
+    token('백성', '귀족', 0, prog(t, 52.1, 53.4), 'rice');
+  }
+  ctx.restore();
+}
+
+/* ---------- 모션그래픽: 용어 카드·도장 ---------- */
+function stamp(x, y, s, text, col, sc = 1, rot = -.1) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(sc, sc);
+  ctx.fillStyle = hexA(col, .92); rrect(-s / 2, -s / 2, s, s, s * .08); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,240,230,.9)'; ctx.lineWidth = s * .04; rrect(-s * .42, -s * .42, s * .84, s * .84, s * .05); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = `900 ${s * .34}px ${SERIF}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, 0, s * .03);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
+function card(t, a, b, o) {
+  const v = fade(t, a, b, .35, .35); if (v <= 0) return;
+  const ent = easeOut(prog(t, a, a + .45)), x = 90, y = 740 + (1 - ent) * 24, w = 900, h = 210;
+  ctx.save(); ctx.globalAlpha = v;
+  ctx.beginPath(); ctx.rect(x - 20, y - 60, (w + 60) * ent, h + 120); ctx.clip();
+  ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  ctx.fillStyle = C.paper; rrect(x, y, w, h, 22); ctx.fill(); ctx.shadowColor = 'transparent';
+  ctx.save(); rrect(x, y, w, h, 22); ctx.clip(); ctx.globalAlpha *= .55; ctx.drawImage(PAPER, x, y, w, h); ctx.restore();
+  ctx.fillStyle = o.color; rrect(x, y, 16, h, 8); ctx.fill();
+  ctx.textAlign = 'left'; ctx.fillStyle = o.color; ctx.font = `900 92px ${SERIF}`; ctx.fillText(o.title, x + 52, y + 118);
+  const tw = ctx.measureText(o.title).width;
+  if (o.hanja) { ctx.font = `600 36px ${SERIF}`; ctx.fillStyle = 'rgba(42,38,34,.55)'; ctx.fillText(o.hanja, x + 60 + tw, y + 74); }
+  ctx.font = `800 46px ${SANS}`; ctx.fillStyle = C.ink; ctx.fillText(o.desc, x + 52, y + 178);
+  ctx.restore();
+  if (o.stamp) { const sp = prog(t, a + .25, a + .5); if (sp > 0) { ctx.save(); ctx.globalAlpha = v * clamp(sp * 3); stamp(x + w - 110, y + h / 2, 150, o.stamp, o.stampColor || C.red, lerp(1.5, 1, easeOut(sp))); ctx.restore(); } }
+}
+function tag(x, y, tx, ty, text, col, p) {
+  if (p <= 0) return;
+  ctx.save(); ctx.globalAlpha = clamp(p * 2);
+  stroke(x, y, lerp(x, tx, easeOut(p)), lerp(y, ty, easeOut(p)), 4, 'rgba(255,255,255,.85)');
+  ctx.fillStyle = '#fff'; circle(x, y, 8);
+  if (p > .5) pill(tx, ty, text, col);
+  ctx.restore();
+}
+function summary(t) {
+  const v = fade(t, 55.5, 59.4, .45, .45); if (v <= 0) return;
+  ctx.save(); ctx.globalAlpha = v;
+  const items = [[C.red, '녹읍', '귀족', 'rice'], [C.green, '정전', '백성', 'land']];
+  ctx.font = `800 40px ${SANS}`; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.fillText('이것만 기억!', W / 2, 320);
+  items.forEach(([col, a, b], i) => {
+    const p = easeOut(prog(t, 55.6 + i * .35, 56.2 + i * .35)), x = 95 + i * 470, y = 360 + (1 - p) * 30;
+    ctx.save(); ctx.globalAlpha *= p;
+    ctx.fillStyle = C.paper; rrect(x, y, 420, 380, 30); ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 8; ctx.stroke();
+    ctx.fillStyle = col; ctx.font = `900 112px ${SERIF}`; ctx.fillText(a, x + 210, y + 160);
+    ctx.fillStyle = C.ink; ctx.font = `800 64px ${SANS}`; ctx.fillText('↓', x + 210, y + 240);
+    ctx.fillStyle = col; ctx.font = `900 80px ${SERIF}`; ctx.fillText(b, x + 210, y + 335);
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+/* ---------- 자막 (목소리 대신) ---------- */
+const SUBS = [
+  [0.3, 3.0, 'd', '두지', ['이 땅이…', '진짜 제 땅입니까?']],
+  [3.3, 5.8, 'n', '', ['1300년 전 신라.']],
+  [5.8, 8.0, 'n', '', ['이 농부의 집은,', '평생 남의 땅에서 일했어요.']],
+  [8.3, 12.6, 'n', '', ['그때 나라는 높은 귀족에게,', '월급 대신 마을 하나를', '통째로 줬어요.']],
+  [12.8, 18.0, 'n', '', ['이걸 녹읍이라고 해요.']],
+  [18.3, 23.0, 'n', '', ['귀족은 그 마을의', '쌀을 가져가고,']],
+  [23.2, 25.4, 'n', '', ['사람들한테', '일까지 시켰어요.']],
+  [25.6, 28.0, 'd', '아버지', ['우리 논은…', '언제 가누…']],
+  [28.3, 30.1, 'n', '', ['왕은 이게 싫었어요.']],
+  [30.1, 32.1, 'n', '', ['귀족 힘이', '너무 세지니까요.']],
+  [32.1, 35.0, 'n', '', ['그래서,', '녹읍을 없애 버려요.']],
+  [35.6, 39.0, 'n', '', ['그리고 722년.']],
+  [39.3, 42.2, 'n', '', ['왕은 반대로,', '백성에게 땅을 줬어요.']],
+  [42.2, 45.0, 'n', '', ['이게 정전이에요.']],
+  [45.6, 48.8, 'd', '두지', ['아버지…', '보고 계십니까.']],
+  [49.3, 51.1, 'n', '', ['그런데 35년 뒤,']],
+  [51.1, 55.0, 'n', '', ['귀족들은 녹읍을', '다시 가져가요.']],
+  [55.3, 58.0, 'n', '', ['녹읍은 귀족에게,', '정전은 백성에게.']],
+  [58.0, 59.6, 'n', '', ['이것만 기억하세요!']],
+];
+const KEYWORDS = ['녹읍', '정전', '귀족', '백성', '722년', '35년'];
+function drawLine(text, x, y, font, baseCol) {     // 핵심어만 색을 바꿔 그림
+  ctx.font = font; ctx.textAlign = 'left';
+  const parts = []; let rest = text;
+  while (rest.length) {
+    let best = -1, kw = '';
+    for (const k of KEYWORDS) { const i = rest.indexOf(k); if (i >= 0 && (best < 0 || i < best)) { best = i; kw = k; } }
+    if (best < 0) { parts.push([rest, baseCol]); break; }
+    if (best > 0) parts.push([rest.slice(0, best), baseCol]);
+    parts.push([kw, kw === '녹읍' || kw === '귀족' ? '#ff8a73' : kw === '정전' || kw === '백성' ? '#9fdcc4' : '#ffd27a']);
+    rest = rest.slice(best + kw.length);
+  }
+  const total = parts.reduce((n, [s]) => n + ctx.measureText(s).width, 0);
+  let cx = x - total / 2;
+  for (const [s, col] of parts) {
+    ctx.lineJoin = 'round'; ctx.lineWidth = 12; ctx.strokeStyle = 'rgba(10,8,6,.9)'; ctx.strokeText(s, cx, y);
+    ctx.fillStyle = col; ctx.fillText(s, cx, y); cx += ctx.measureText(s).width;
+  }
+}
+function subtitles(t) {
+  for (const [a, b, kind, who, lines] of SUBS) {
+    const v = fade(t, a, b, .2, .2); if (v <= 0) continue;
+    ctx.save(); ctx.globalAlpha = v;
+    const y0 = 1250 + (1 - easeOut(prog(t, a, a + .25))) * 14 - (lines.length - 1) * 42;
+    if (kind === 'd') {
+      ctx.font = `700 34px ${SANS}`; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(233,227,212,.85)';
+      ctx.fillText(`— ${who} —`, W / 2, y0 - 70);
+      lines.forEach((l, i) => drawLine(i === 0 ? `“${l}` : i === lines.length - 1 ? `${l}”` : l, W / 2, y0 + i * 84, `900 66px ${SERIF}`, '#fff6e0'));
+    } else {
+      lines.forEach((l, i) => drawLine(l, W / 2, y0 + i * 80, `800 60px ${SANS}`, '#ffffff'));
+    }
+    ctx.restore();
+  }
+}
+
+/* ---------- 장면 ---------- */
+const MAP_VILLAGES = [[280, 620], [780, 560], [540, 1130], [250, 1470], [830, 1440]];
+function drawMap(t, reveal) {
+  paperBg(.1);
+  ctx.save(); ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(70,90,100,.55)'; ctx.lineWidth = 34; ctx.setLineDash([3200 * reveal, 4000]);
+  ctx.beginPath(); ctx.moveTo(60, 420); ctx.bezierCurveTo(500, 520, 160, 980, 620, 1250); ctx.bezierCurveTo(900, 1420, 700, 1700, 1040, 1860); ctx.stroke();
+  ctx.setLineDash([]);
+  const r = rng(77);
+  for (let i = 0; i < 48; i++) {
+    const x = 90 + r() * 880, y = 330 + r() * 1400, w = 70 + r() * 90, h = 50 + r() * 60;
+    if (i / 48 > reveal) continue;
+    ctx.strokeStyle = 'rgba(42,38,34,.35)'; ctx.lineWidth = 3; ctx.strokeRect(x, y, w, h);
+    stroke(x, y + h / 2, x + w, y + h / 2, 2, 'rgba(42,38,34,.2)');
+  }
+  MAP_VILLAGES.forEach(([x, y], i) => {
+    if (i / 5 > reveal * 1.1) return;
+    for (let k = 0; k < 3; k++) {
+      const hx = x + (k - 1) * 46, hy = y + (k % 2) * 18;
+      ctx.fillStyle = 'rgba(42,38,34,.75)'; ctx.beginPath(); ctx.moveTo(hx - 26, hy); ctx.quadraticCurveTo(hx, hy - 42, hx + 26, hy); ctx.closePath(); ctx.fill();
+      ctx.fillRect(hx - 18, hy, 36, 20);
+    }
+  });
+  ctx.restore();
+}
+const SCENES = [
+  // 0 · 훅 (722) — 땅 문서를 쥔 손
+  [0, 3, t => {
+    sky(722, t, [760, 1010]); hills(722, 1060, t); field722(t, 1060);
+    const y = 1560;
+    scroll(540, y, 640, 360, t, .6);
+    hand(205, y + 40, 150, .25, '#5a3c24', .55); hand(875, y + 40, 150, -.25, '#5a3c24', .55);
+  }],
+  // 1 · 681 능선의 귀족 행렬과 아이
+  [3, 8, t => {
+    sky(681, t); hills(681, 900, t);
+    const ry = x => 760 - 50 * Math.sin(x * .004 + 1);
+    ctx.fillStyle = '#4a5157'; ctx.beginPath(); ctx.moveTo(0, H); for (let x = 0; x <= W; x += 10) ctx.lineTo(x, ry(x)); ctx.lineTo(W, H); ctx.fill();
+    field681(t, 960);
+    for (let i = 0; i < 9; i++) {
+      const x = -140 + (t - 3) * 70 + i * 92; if (x < -80 || x > W + 80) continue;
+      const noble = i < 4, s = noble ? 92 : 78, bob = Math.abs(Math.sin(t * 5 + i)) * 3;
+      fig(x, ry(x) + 6 - bob, s, { color: noble ? C.purple : '#2c2a27', hat: noble, bend: noble ? 0 : 8 });
+    }
+    ctx.fillStyle = '#16120f';             // 앞쪽 마른 풀
+    for (let i = 0; i < 70; i++) { const x = i * 16 - 20, h = 140 + (i * 37 % 120), sw = Math.sin(t * 1.5 + i) * 18; ctx.beginPath(); ctx.moveTo(x, H); ctx.quadraticCurveTo(x + sw * .4, H - h * .6, x + sw, H - h); ctx.lineTo(x + 6, H); ctx.fill(); }
+    ctx.save(); ctx.translate(250, 1600); ctx.fillStyle = '#120f0c';  // 웅크린 아이
+    ctx.beginPath(); ctx.ellipse(0, 0, 120, 150, -.2, 0, 7); ctx.fill(); circle(40, -170, 64); circle(30, -232, 22); ctx.restore();
+    rain(t);
+    tag(380, 700, 380, 560, '귀족', C.red, prog(t, 4.4, 5.1));
+    tag(330, 1420, 520, 1060, '농부의 아들', C.green, prog(t, 5.4, 6.1));
+  }],
+  // 2 · 고을 지도에 도장 (681)
+  [8, 18, t => {
+    drawMap(t, prog(t, 8, 10.4));
+    const [vx, vy] = MAP_VILLAGES[2];
+    const d = easeOut(prog(t, 9.7, 10.8)), lift = ease(prog(t, 11.6, 12.6));
+    redMark(vx, vy, 150, prog(t, 10.8, 11.3));
+    if (t < 12.6) {
+      const sx = vx + lift * 300, sy = lerp(vy - 360, vy, d) - lift * 420, sc = lerp(1.35, 1, d);
+      sleeve(W + 60, sy + 260, sx + 40, sy + 70, 120, C.purple);
+      hand(sx + 30, sy + 60, 95, -.8, '#c9a48a', .7);
+      ctx.fillStyle = '#7fb59a'; circle(sx + 10, sy + 70, 10);               // 옥가락지
+      seal(sx, sy, 150 * sc, 1 - lift);
+    }
+    if (t > 10.75 && t < 11.1) { ctx.fillStyle = `rgba(0,0,0,${.25 * (1 - prog(t, 10.75, 11.1))})`; ctx.fillRect(0, 0, W, H); }
+    ctx.fillStyle = `rgba(20,16,12,${.35 * prog(t, 13.2, 13.8)})`; ctx.fillRect(0, 0, W, 700);
+  }],
+  // 3 · 쌀자루를 빼앗기다 (681)
+  [18, 23, t => {
+    sky(681, t); hills(681, 900, t); field681(t, 900);
+    hut(800, 1260, 420);
+    const peek = .6 + .4 * Math.sin(t * 2);
+    ctx.fillStyle = `rgba(200,190,175,${.5 * peek})`; circle(788, 1170, 6); circle(808, 1170, 6);  // 문틈의 아이 눈
+    const p = ease(prog(t, 18.6, 21.6)), sx = lerp(470, 1180, p), sy = 1360 + Math.sin(p * 20) * 3;
+    sleeve(W + 80, sy - 40, sx + 50, sy - 30, 70, C.indigo);
+    ctx.fillStyle = '#c8b07c'; ctx.beginPath(); ctx.ellipse(sx, sy, 80, 100, .15, 0, 7); ctx.fill();
+    ctx.fillStyle = '#8a6b3c'; ctx.fillRect(sx - 40, sy - 98, 80, 16);
+    fig(330, 1640, 640, { color: '#1b1714', arm: [lerp(150, 30, p), lerp(-330, -250, p)] });
+    rain(t);
+  }],
+  // 4 · 담장 공사 (681)
+  [23, 28, t => {
+    sky(681, t); hills(681, 880, t); field681(t, 900, false);
+    ctx.fillStyle = '#7a6a56'; ctx.beginPath(); ctx.moveTo(620, 1500); ctx.lineTo(620, 760); ctx.lineTo(W, 520); ctx.lineTo(W, 1700); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#2f2a26'; ctx.beginPath(); ctx.moveTo(600, 770); ctx.lineTo(W, 500); ctx.lineTo(W, 560); ctx.lineTo(640, 800); ctx.closePath(); ctx.fill();
+    for (let i = 0; i < 4; i++) { const x = 760 + i * 70 + (t - 23) * 14, s = 210 - i * 22; fig(x, 1180 - i * 40, s, { color: '#2c2824', stone: true, bend: 10 }); }
+    const fx = 300 + (t - 23) * 34, bob = Math.abs(Math.sin(t * 4)) * 10;
+    fig(fx, 1640 - bob, 560, { color: '#191512', stone: true, bend: 14 });
+    fig(fx - 230, 1700 - Math.abs(Math.sin(t * 4 + 1)) * 6, 270, { color: '#211c18' });
+    rain(t, .25);
+  }],
+  // 5 · 왕의 소매가 도장을 집어 가다 (689)
+  [28, 35, t => {
+    drawMap(t, 1);
+    const [vx, vy] = MAP_VILLAGES[2]; redMark(vx, vy, 150, 1);
+    const g = easeOut(prog(t, 28.8, 30.2)), up = ease(prog(t, 30.5, 31.6));
+    const sx = vx + 210, sy = lerp(-200, vy, g) - up * (vy + 300);
+    seal(vx + 210, up > 0 ? sy : vy, 150);
+    if (g > 0) { sleeve(sx + 40, -200, sx + 10, sy - 90, 130, C.crimson); ctx.strokeStyle = C.gold; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(sx - 50, sy - 110); ctx.lineTo(sx + 70, sy - 110); ctx.stroke(); hand(sx, sy - 40, 95, Math.PI, '#d2ae90', .75); }
+    const fist = prog(t, 31.6, 32.6);
+    sleeve(-60, 1800, 330, 1480, 140, C.purple);
+    hand(380, 1440, lerp(120, 100, fist), -.6, '#c9a48a', fist); ctx.fillStyle = '#7fb59a'; circle(350, 1470, 10);
+    ctx.fillStyle = `rgba(20,16,12,${.35 * prog(t, 28, 28.5)})`; ctx.fillRect(0, 0, W, 700);
+  }],
+  // 6 · 아이 손 → 어른 손 (681 → 722)
+  [35, 39, t => {
+    const sw = prog(t, 36.4, 37.1);
+    if (sw < 1) {
+      ctx.fillStyle = '#4a4741'; ctx.fillRect(0, 0, W, H);
+      for (const m of MUD) { ctx.fillStyle = `rgba(${90 + m.v * 40},${86 + m.v * 36},${80 + m.v * 30},.35)`; ctx.beginPath(); ctx.ellipse(m.x * W, m.y * H, m.s, m.s * .6, 0, 0, 7); ctx.fill(); }
+      hand(540, 1180, 260, 0, '#8d8174', prog(t, 35.4, 36.6) * .5);
+    }
+    if (sw > 0) {
+      ctx.save(); ctx.globalAlpha = sw;
+      const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#6b4a24'); g.addColorStop(1, '#2a1c10'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      for (const m of MUD) { ctx.fillStyle = `rgba(${60 + m.v * 50},${40 + m.v * 30},${20 + m.v * 14},.4)`; ctx.beginPath(); ctx.ellipse(m.x * W, m.y * H, m.s, m.s * .6, 0, 0, 7); ctx.fill(); }
+      for (let i = 0; i < 14; i++) { const x = i * 80 + 20, sw2 = Math.sin(t * 1.3 + i) * 20; ctx.strokeStyle = 'rgba(232,180,80,.9)'; ctx.lineWidth = 9; ctx.beginPath(); ctx.moveTo(x, 760); ctx.quadraticCurveTo(x + sw2 * .5, 400, x + sw2, 120); ctx.stroke(); ctx.fillStyle = '#f2c560'; ctx.beginPath(); ctx.ellipse(x + sw2, 130, 16, 46, 0, 0, 7); ctx.fill(); }
+      const r = ctx.createRadialGradient(540, 200, 0, 540, 200, 900); r.addColorStop(0, 'rgba(255,220,150,.45)'); r.addColorStop(1, 'rgba(255,220,150,0)'); ctx.fillStyle = r; ctx.fillRect(0, 0, W, H);
+      hand(540, 1180, 300, 0, '#5a3c24', prog(t, 37.5, 38.8) * .9);
+      ctx.restore();
+    }
+    if (sw > 0 && sw < 1) { ctx.fillStyle = `rgba(255,236,190,${bump(sw, 0, 1) * .6})`; ctx.fillRect(0, 0, W, H); }
+    const yp = fade(t, 37.3, 38.9, .2, .5);
+    if (yp > 0) { ctx.save(); ctx.globalAlpha = yp; stamp(540, 860, 230, '722', C.red, lerp(1.5, 1, easeOut(prog(t, 37.3, 37.6)))); ctx.restore(); }
+  }],
+  // 7 · 정전 지급 (722)
+  [39, 45, t => {
+    sky(722, t, [790, 1080]); hills(722, 1140, t); field722(t, 1140);
+    const come = easeOut(prog(t, 39.2, 40.6)), take = ease(prog(t, 42.4, 44.4));
+    const sy = lerp(980, 1060, come) + take * 260;
+    if (take < .8) sleeve(W + 120, lerp(560, 760, come) - take * 400, 700 + take * 200, sy - 10 - take * 300, 110, C.blue);
+    scroll(540, sy, 430, 110, t * .2, prog(t, 42, 43.5));
+    const hy = lerp(1750, sy + 40, easeOut(prog(t, 39.8, 41.2)));
+    hand(330, hy, 150, .35, '#5a3c24', .6); hand(750, hy, 150, -.35, '#5a3c24', .6);
+    ctx.fillStyle = '#120d09'; ctx.beginPath(); ctx.ellipse(540, H + 120, 520, 330, 0, 0, 7); ctx.fill(); circle(540, 1650, 120);
+  }],
+  // 8 · 아버지… 보고 계십니까 (722)
+  [45, 49, t => {
+    sky(722, t, [540, 1030]); hills(722, 1060, t); field722(t, 1060);
+    kneel(540, 1560, 470, t);
+  }],
+  // 9 · 손자가 도장을 다시 쥐다 (757)
+  [49, 55, t => {
+    ctx.fillStyle = '#0d1219'; ctx.fillRect(0, 0, W, H);
+    const wg = ctx.createLinearGradient(640, 0, W, 0); wg.addColorStop(0, '#5a3a1c'); wg.addColorStop(1, '#e6a25a');
+    ctx.fillStyle = wg; ctx.fillRect(660, 760, 360, 760);
+    ctx.strokeStyle = '#1a140f'; ctx.lineWidth = 12;
+    for (let i = 0; i <= 4; i++) { stroke(660 + i * 90, 760, 660 + i * 90, 1520, 12, '#1a140f'); }
+    for (let j = 0; j <= 8; j++) { stroke(660, 760 + j * 95, 1020, 760 + j * 95, 12, '#1a140f'); }
+    const sp = ctx.createRadialGradient(840, 1140, 0, 840, 1140, 900); sp.addColorStop(0, 'rgba(230,160,80,.28)'); sp.addColorStop(1, 'rgba(230,160,80,0)'); ctx.fillStyle = sp; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#05070a'; ctx.beginPath(); ctx.moveTo(140, H); ctx.quadraticCurveTo(160, 1150, 420, 1100); ctx.quadraticCurveTo(620, 1130, 640, H); ctx.fill();
+    circle(430, 960, 95); ctx.fillRect(360, 820, 140, 70); ctx.fillRect(240, 846, 380, 14);
+    ctx.strokeStyle = 'rgba(240,170,90,.75)'; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(430, 960, 95, -1.2, .9); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(600, 1140); ctx.quadraticCurveTo(632, 1300, 640, 1500); ctx.stroke();
+    hand(540, 1560, 240, Math.PI, '#3a2a20', 0);
+    seal(540, 1500, 120);
+    const glow = ctx.createRadialGradient(540, 1500, 0, 540, 1500, 160); glow.addColorStop(0, 'rgba(200,65,43,.6)'); glow.addColorStop(1, 'rgba(200,65,43,0)'); ctx.fillStyle = glow; circle(540, 1500, 160);
+    const cl = ease(prog(t, 51.2, 52.8));
+    ctx.fillStyle = '#2e2119'; rrect(540 - 150, 1420 - 30 + (1 - cl) * 200, 300, 160 * cl + 20, 60); if (cl > 0) ctx.fill();
+    if (cl > .9) { ctx.fillStyle = hexA(C.red, .9); ctx.fillRect(470, 1430 + 150 * cl - 4, 140, 6); }
+  }],
+  // 10 · 마무리 (722) — 첫 장면으로 이어짐
+  [55, 60, t => {
+    sky(722, t, [720, 1240]); hills(722, 1300, t); field722(t, 1300);
+    fig(540, 1600, 260, { color: '#18120d' });
+    ctx.fillStyle = '#f0e2bf'; ctx.fillRect(575, 1430, 16, 60);
+    const k = prog(t, 59.3, 60);
+    if (k > 0) { ctx.save(); ctx.globalAlpha = k; SCENES[0][2](0); ctx.restore(); }
+  }],
+];
+
+/* ---------- 오버레이 ---------- */
+let grainSeed = 0;
+function overlays(t) {
+  const v = ctx.createRadialGradient(W / 2, H * .5, 500, W / 2, H * .5, 1150);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,.45)'); ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.globalAlpha = .55; ctx.globalCompositeOperation = 'overlay';
+  const ox = (grainSeed * 97) % 360, oy = (grainSeed * 53) % 640;
+  for (let x = -ox; x < W; x += 360) for (let y = -oy; y < H; y += 640) ctx.drawImage(GRAIN, x, y);
+  ctx.restore();
+}
+
+/* ---------- 프레임 그리기 ---------- */
+function render(t) {
+  t = clamp(t, 0, DUR - 1e-6);
+  grainSeed = Math.floor(t * FPS);
+  const sc = SCENES.find(s => t >= s[0] && t < s[1]) || SCENES[SCENES.length - 1];
+  const lt = prog(t, sc[0], sc[1]);
+  ctx.save(); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  const z = 1 + .045 * lt; ctx.translate(W / 2, H / 2); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2);
+  sc[2](t);
+  ctx.restore();
+  overlays(t);
+  timeline(t); flow(t);
+  card(t, 12.6, 18, { title: '녹읍', hanja: '祿邑', desc: '월급 대신 받은 마을', color: C.red });
+  card(t, 31.8, 35, { title: '녹읍 폐지', desc: '신문왕', color: C.red, stamp: '689' });
+  card(t, 41.2, 45, { title: '정전', hanja: '丁田', desc: '백성에게 준 땅 · 성덕왕', color: C.green, stamp: '722', stampColor: C.green });
+  card(t, 51.3, 55, { title: '녹읍 부활', desc: '경덕왕', color: C.red, stamp: '757' });
+  summary(t);
+  subtitles(t);
+}
+
+/* ---------- 재생·녹화 ---------- */
+if (typeof window !== 'undefined' && !window.__TEST__) {
+  const playBtn = document.getElementById('play'), seek = document.getElementById('seek'), timeEl = document.getElementById('time'), recBtn = document.getElementById('rec');
+  let playing = false, t0 = 0, base = 0, cur = 0, recording = false;
+  const show = t => { cur = t; render(t); seek.value = t; timeEl.textContent = `${t.toFixed(1)} / ${DUR}s`; };
+  function loop() {
+    if (!playing) return;
+    const t = base + (performance.now() - t0) / 1000;
+    if (t >= DUR) { show(DUR - .001); playing = false; playBtn.textContent = '▶ 재생'; if (recording) stopRec(); return; }
+    show(t); requestAnimationFrame(loop);
+  }
+  function play(from) { base = from; t0 = performance.now(); playing = true; playBtn.textContent = '❚❚ 일시정지'; requestAnimationFrame(loop); }
+  playBtn.onclick = () => { if (recording) return; if (playing) { playing = false; base = cur; playBtn.textContent = '▶ 재생'; } else play(cur >= DUR - .05 ? 0 : cur); };
+  seek.oninput = () => { if (recording) return; playing = false; playBtn.textContent = '▶ 재생'; show(+seek.value); };
+
+  let rec, chunks = [], mime = '';
+  function stopRec() {
+    rec.stop(); recording = false; recBtn.disabled = false; playBtn.disabled = false; seek.disabled = false; recBtn.textContent = '● 녹화해서 영상 저장';
+  }
+  recBtn.onclick = () => {
+    if (!cv.captureStream || typeof MediaRecorder === 'undefined') { alert('이 브라우저는 녹화를 지원하지 않아요. 최신 Chrome에서 열어 주세요.'); return; }
+    mime = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
+    const stream = cv.captureStream(FPS);
+    rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 12e6 } : { videoBitsPerSecond: 12e6 });
+    chunks = [];
+    rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+    rec.onstop = () => {
+      const blob = new Blob(chunks, { type: mime || 'video/webm' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = `s1-nogeup-war.${(mime || 'webm').includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    };
+    recording = true; recBtn.disabled = true; playBtn.disabled = true; seek.disabled = true; recBtn.textContent = '녹화 중… (60초)';
+    show(0); rec.start(250); play(0);
+  };
+  const ready = document.fonts ? Promise.race([Promise.all([document.fonts.load(`900 60px "Noto Serif KR"`), document.fonts.load(`800 60px Pretendard`)]), new Promise(r => setTimeout(r, 4000))]) : Promise.resolve();
+  ready.then(() => show(+(new URLSearchParams(location.search).get('t') || 0)));
+}
+</script>
+</body>
+</html>
